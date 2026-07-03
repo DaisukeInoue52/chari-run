@@ -80,8 +80,10 @@ let bests = {
   hard: Number(localStorage.getItem('chari_best_hard') || 0)
 };
 
-// ===== 共有ランキング（kvdb.io）=====
-const LB_URL = 'https://kvdb.io/E3vsJh1SG6fvFdVhny1zeS';
+// ===== 共有ランキング（textdb.online：登録不要の無料サービス）=====
+const LB_KEY = 'fbfa71b1-b7a7-40b1-8664-bf1752b6f4c7';
+const LB_READ = 'https://textdb.online/' + LB_KEY;
+const LB_WRITE = 'https://textdb.online/update';
 let playerName = localStorage.getItem('chari_name') || '';
 let nameAsked = false;
 let ranking = [];        // [{name, easy, normal, hard}]
@@ -109,22 +111,35 @@ function changeName() {
   fetchRanking(true);
 }
 
+// 全員分のスコアを1つのJSONドキュメントで管理: {"scores":{"名前":{"easy":n,"normal":n,"hard":n}}}
+async function lbLoad() {
+  const res = await fetch(LB_READ + '?_=' + Date.now()); // キャッシュ回避
+  if (!res.ok) throw new Error('http ' + res.status);
+  const text = await res.text();
+  if (!text.trim()) return { scores: {} };
+  try {
+    const d = JSON.parse(text);
+    return d && typeof d.scores === 'object' ? d : { scores: {} };
+  } catch (e) {
+    return { scores: {} };
+  }
+}
+
+function applyRanking(d) {
+  ranking = Object.entries(d.scores).map(([name, v]) => ({
+    name,
+    easy: (v && v.easy) || 0,
+    normal: (v && v.normal) || 0,
+    hard: (v && v.hard) || 0
+  }));
+}
+
 async function fetchRanking(force = false) {
   if (!force && Date.now() - rankingFetchedAt < 10000) return;
   rankingFetchedAt = Date.now();
   try {
-    const res = await fetch(LB_URL + '/?values=true&format=json');
-    if (!res.ok) throw new Error('http ' + res.status);
-    const arr = await res.json();
-    ranking = arr.map((item) => {
-      try {
-        const key = Array.isArray(item) ? item[0] : item.key;
-        const val = Array.isArray(item) ? item[1] : item.value;
-        const d = typeof val === 'string' ? JSON.parse(val) : val;
-        return { name: key, easy: d.easy || 0, normal: d.normal || 0, hard: d.hard || 0 };
-      } catch (e) { return null; }
-    }).filter(Boolean);
-    if (rankingStatus !== '未認証') rankingStatus = '';
+    applyRanking(await lbLoad());
+    rankingStatus = '';
   } catch (e) {
     rankingStatus = '通信エラー';
   }
@@ -133,26 +148,21 @@ async function fetchRanking(force = false) {
 async function submitScore(diffKey, score) {
   if (!playerName || score <= 0) return;
   try {
-    // サーバー上の自己ベストとマージして高い方を残す
-    let cur = {};
-    try {
-      const r = await fetch(LB_URL + '/' + encodeURIComponent(playerName));
-      if (r.ok) cur = await r.json();
-    } catch (e) {}
-    if ((cur[diffKey] || 0) >= score) { fetchRanking(true); return; }
+    // 最新の全員分を読み込み、自分のベストとマージして書き戻す
+    const d = await lbLoad();
+    const cur = d.scores[playerName] || {};
+    if ((cur[diffKey] || 0) >= score) { applyRanking(d); return; }
     cur[diffKey] = score;
     cur.t = Date.now();
-    const res = await fetch(LB_URL + '/' + encodeURIComponent(playerName), {
-      method: 'POST',
-      body: JSON.stringify(cur)  // text/plain扱い＝preflight不要
-    });
-    if (!res.ok) {
-      const msg = await res.text();
-      rankingStatus = /verified/i.test(msg) ? '未認証' : '送信エラー';
-    } else {
-      rankingStatus = '';
-    }
-    fetchRanking(true);
+    d.scores[playerName] = cur;
+    const body = new URLSearchParams();
+    body.set('key', LB_KEY);
+    body.set('value', JSON.stringify(d)); // フォームPOST＝preflight不要
+    const res = await fetch(LB_WRITE, { method: 'POST', body });
+    const j = await res.json().catch(() => null);
+    rankingStatus = (j && j.status === 1) ? '' : '送信エラー';
+    applyRanking(d);
+    rankingFetchedAt = Date.now();
   } catch (e) {
     rankingStatus = '通信エラー';
   }
@@ -864,11 +874,7 @@ function drawRanking() {
     .slice(0, 10);
 
   ctx.font = '15px "Segoe UI", sans-serif';
-  if (rankingStatus === '未認証') {
-    ctx.fillStyle = '#ffab91';
-    ctx.font = '12px "Segoe UI", sans-serif';
-    ctx.fillText('ランキング準備中です', x + w / 2, y + 90);
-  } else if (rankingStatus === '通信エラー') {
+  if (rankingStatus === '通信エラー' && rows.length === 0) {
     ctx.fillStyle = '#90a4ae';
     ctx.fillText('オフライン', x + w / 2, y + 90);
   } else if (rows.length === 0) {
